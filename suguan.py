@@ -10,15 +10,15 @@ from telegram.ext import (
 )
 from datetime import datetime, timedelta
 
-# Predefined options
+# Options
 ROLES = ["Sugo 1", "Sugo 2", "Reserba 1", "Reserba 2", "Sign Language"]
 LANGUAGES = ["Tagalog", "English"]
 ITEMS_PER_PAGE = 5
 
-# Conversation states
+# States
 DATE, TIME, LOCALE = range(3)
 
-# Start command
+# Start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("Enter Suguan", callback_data="activity")]]
     await update.message.reply_text(
@@ -26,13 +26,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# Handle Enter Suguan button
+# Enter Suguan button
 async def start_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await ask_date(update, context)
+    await update.callback_query.answer()
+    return await ask_date(update, context)
 
-# Ask for Date
+# Ask date
 async def ask_date(update, context):
     if update.callback_query:
         await update.callback_query.edit_message_text(
@@ -46,13 +45,13 @@ async def ask_date(update, context):
         )
     return DATE
 
-# Receive Date
+# Get date
 async def get_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     date_text = update.message.text
     try:
         datetime.strptime(date_text, "%Y-%m-%d")
     except ValueError:
-        await update.message.reply_text("❌ Invalid date format. Please enter YYYY-MM-DD:")
+        await update.message.reply_text("❌ Invalid date format. Use YYYY-MM-DD:")
         return DATE
     context.user_data["date"] = date_text
     await update.message.reply_text(
@@ -61,13 +60,13 @@ async def get_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return TIME
 
-# Receive Time
+# Get time
 async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     time_text = update.message.text
     try:
         datetime.strptime(time_text, "%H:%M")
     except ValueError:
-        await update.message.reply_text("❌ Invalid time format. Please enter HH:MM (24-hour):")
+        await update.message.reply_text("❌ Invalid time format. Use HH:MM (24-hour):")
         return TIME
     context.user_data["time"] = time_text
     await update.message.reply_text(
@@ -76,7 +75,7 @@ async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return LOCALE
 
-# Receive Locale
+# Get locale
 async def get_locale(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["locale"] = update.message.text
     await ask_buttons(update, context, "Select role:", ROLES, "ROLE")
@@ -95,7 +94,7 @@ async def ask_buttons(update, context, question, options, state):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-# Handle Role and Language buttons
+# Handle Role/Language buttons
 async def handle_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -108,7 +107,7 @@ async def handle_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["language"] = data.split("_")[1]
         await finalize_suguan(update, context)
 
-# Finalize Suguan: schedule reminder & show summary
+# Finalize Suguan
 async def finalize_suguan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dt_str = context.user_data["date"] + " " + context.user_data["time"]
     activity_dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
@@ -155,7 +154,7 @@ async def finalize_suguan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# Reminder function
+# Reminder
 async def reminder(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data
     await context.bot.send_message(
@@ -168,15 +167,16 @@ async def reminder(context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# Cancel/Edit or Change Suguan
+# Cancel/Edit
 async def cancel_or_change(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
+    activities = context.user_data.get("activities", [])
+
     if data.startswith("cancel_"):
         idx = int(data.split("_")[1])
-        activities = context.user_data.get("activities", [])
         if idx < len(activities):
             job = activities[idx]["job"]
             if job:
@@ -185,16 +185,14 @@ async def cancel_or_change(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ Suguan cancelled.")
     elif data.startswith("edit_"):
         idx = int(data.split("_")[1])
-        activities = context.user_data.get("activities", [])
         if idx < len(activities):
             job = activities[idx]["job"]
             if job:
                 job.schedule_removal()
             activities.pop(idx)
             await query.edit_message_text("Let's edit your Suguan. Enter the date (YYYY-MM-DD):")
-            await ask_date(update, context)
+            return await ask_date(update, context)
     elif data == "cancel":
-        activities = context.user_data.get("activities", [])
         if activities:
             job = activities[-1]["job"]
             if job:
@@ -202,16 +200,15 @@ async def cancel_or_change(update: Update, context: ContextTypes.DEFAULT_TYPE):
             activities.pop(-1)
         await query.edit_message_text("❌ Your Suguan has been cancelled.")
     elif data == "change":
-        activities = context.user_data.get("activities", [])
         if activities:
             job = activities[-1]["job"]
             if job:
                 job.schedule_removal()
             activities.pop(-1)
         await query.edit_message_text("Let's change your Suguan. Enter the date (YYYY-MM-DD):")
-        await ask_date(update, context)
+        return await ask_date(update, context)
 
-# List Suguans with pagination
+# List Suguans
 async def list_suguans(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
     activities = context.user_data.get("activities", [])
     if not activities:
@@ -260,11 +257,10 @@ async def paginate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.delete()
         await list_suguans(update, context, page=page)
 
-# Main function
+# Main
 def main():
     app = ApplicationBuilder().token("8470276015:AAFxZHzAF-4-Gcrg1YiTT853fYwvfZkj7fM").build()
 
-    # Conversation for Date/Time/Locale
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_activity, pattern="activity")],
         states={
@@ -275,7 +271,6 @@ def main():
         fallbacks=[]
     )
 
-    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv_handler)
     app.add_handler(CallbackQueryHandler(handle_selection, pattern=r"ROLE_|LANGUAGE_"))
