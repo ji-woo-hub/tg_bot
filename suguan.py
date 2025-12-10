@@ -16,9 +16,10 @@ def main():
     app = ApplicationBuilder().token("8470276015:AAFxZHzAF-4-Gcrg1YiTT853fYwvfZkj7fM").build()
     # Order matters: ConversationHandler would go here if we add one
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(enter_suguan, pattern="activity", per_message=True))
+    app.add_handler(CallbackQueryHandler(enter_suguan, pattern="activity"))
     app.run_polling()
 
 if __name__ == "__main__":
     main()
+
 
