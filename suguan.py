@@ -11,6 +11,8 @@ from telegram.ext import (
     filters,
 )
 
+import asyncio  # <-- Needed for async scheduling
+
 # --- Conversation States ---
 DATE, TIME, LOCALE, ROLE, LANGUAGE = range(5)
 
@@ -142,6 +144,22 @@ async def language_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
+    context.user_data["schedule_id"] = schedule_id  # Save for async reminder
+
+    # --- FIX: schedule reminder asynchronously ---
+    async def schedule_reminder():
+        dt_str = f"{context.user_data['date']} {context.user_data['time_24']}"
+        dt_obj = datetime.strptime(dt_str, "%m-%d-%Y %H:%M")
+        remind_time = dt_obj - timedelta(hours=3)
+        if remind_time > datetime.now():
+            chat_id = query.message.chat_id
+            context.application.job_queue.run_once(
+                reminder, remind_time, chat_id=chat_id, data=schedule_id
+            )
+
+    asyncio.create_task(schedule_reminder())
+    # --- END FIX ---
+
     summary = (
         f"📌 **Suguan Scheduled**\n"
         f"Date: {context.user_data['date']} ({context.user_data['day']})\n"
@@ -151,37 +169,8 @@ async def language_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Language: {context.user_data['language']}\n\n"
         f"⏰ Reminder will be sent 3 hours before the Suguan"
     )
-
     await query.edit_message_text(summary, parse_mode="Markdown")
-    context.user_data["schedule_id"] = schedule_id  # for post-handler scheduling
     return ConversationHandler.END
-
-
-# --- Schedule reminder after conversation ends ---
-async def after_enter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    schedule_id = context.user_data.get("schedule_id")
-    if not schedule_id:
-        return
-
-    # Get schedule details
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT date, time_24 FROM schedules WHERE id=?', (schedule_id,))
-    row = c.fetchone()
-    conn.close()
-
-    if not row:
-        return
-
-    date_str, time_str = row
-    dt_obj = datetime.strptime(f"{date_str} {time_str}", "%m-%d-%Y %H:%M")
-    remind_time = dt_obj - timedelta(hours=3)
-
-    if remind_time > datetime.now():
-        chat_id = update.effective_chat.id
-        context.application.job_queue.run_once(
-            reminder, remind_time, chat_id=chat_id, data=schedule_id
-        )
 
 
 # --- Reminder job ---
@@ -267,7 +256,6 @@ def main():
     init_db()
     app = ApplicationBuilder().token("YOUR_BOT_TOKEN").build()
 
-    # Conversation for enter
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("(?i)^enter$"), enter_command)],
         states={
@@ -277,8 +265,7 @@ def main():
             ROLE: [CallbackQueryHandler(role_input, pattern="ROLE_")],
             LANGUAGE: [CallbackQueryHandler(language_input, pattern="LANG_")],
         },
-        fallbacks=[],
-        post_handlers=[after_enter]  # <-- fixed: schedule reminder after conversation ends
+        fallbacks=[]
     )
 
     app.add_handler(CommandHandler("start", start))
