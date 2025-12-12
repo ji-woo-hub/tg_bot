@@ -246,7 +246,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Main function ---
 def main():
     init_db()
-    app = ApplicationBuilder().token("YOUR_BOT_TOKEN").build()
+    app = ApplicationBuilder().token("8470276015:AAFxZHzAF-4-Gcrg1YiTT853fYwvfZkj7fM").build()
 
     # Conversation for enter
     conv_handler = ConversationHandler(
@@ -272,3 +272,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
