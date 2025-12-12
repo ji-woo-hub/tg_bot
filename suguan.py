@@ -122,7 +122,7 @@ async def language_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     language = query.data.split("_", 1)[1]
     context.user_data["language"] = language
 
-    # Save to database
+    # Save schedule to database
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
@@ -142,15 +142,6 @@ async def language_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    # Schedule reminder 3 hours before
-    dt_str = f"{context.user_data['date']} {context.user_data['time_24']}"
-    dt_obj = datetime.strptime(dt_str, "%m-%d-%Y %H:%M")
-    remind_time = dt_obj - timedelta(hours=3)
-    if remind_time > datetime.now():
-        context.job_queue.run_once(
-            reminder, remind_time, chat_id=update.effective_chat.id, data=schedule_id
-        )
-
     summary = (
         f"📌 **Suguan Scheduled**\n"
         f"Date: {context.user_data['date']} ({context.user_data['day']})\n"
@@ -158,11 +149,39 @@ async def language_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Locale: {context.user_data['locale']}\n"
         f"Role: {context.user_data['role']}\n"
         f"Language: {context.user_data['language']}\n\n"
-        f"⏰ Reminder set 3 hours before the Suguan"
+        f"⏰ Reminder will be sent 3 hours before the Suguan"
     )
 
     await query.edit_message_text(summary, parse_mode="Markdown")
+    context.user_data["schedule_id"] = schedule_id  # for post-handler scheduling
     return ConversationHandler.END
+
+
+# --- Schedule reminder after conversation ends ---
+async def after_enter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    schedule_id = context.user_data.get("schedule_id")
+    if not schedule_id:
+        return
+
+    # Get schedule details
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT date, time_24 FROM schedules WHERE id=?', (schedule_id,))
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        return
+
+    date_str, time_str = row
+    dt_obj = datetime.strptime(f"{date_str} {time_str}", "%m-%d-%Y %H:%M")
+    remind_time = dt_obj - timedelta(hours=3)
+
+    if remind_time > datetime.now():
+        chat_id = update.effective_chat.id
+        context.application.job_queue.run_once(
+            reminder, remind_time, chat_id=chat_id, data=schedule_id
+        )
 
 
 # --- Reminder job ---
@@ -246,7 +265,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Main function ---
 def main():
     init_db()
-    app = ApplicationBuilder().token("8470276015:AAFxZHzAF-4-Gcrg1YiTT853fYwvfZkj7fM").build()
+    app = ApplicationBuilder().token("YOUR_BOT_TOKEN").build()
 
     # Conversation for enter
     conv_handler = ConversationHandler(
@@ -259,6 +278,7 @@ def main():
             LANGUAGE: [CallbackQueryHandler(language_input, pattern="LANG_")],
         },
         fallbacks=[],
+        post_handlers=[after_enter]  # <-- fixed: schedule reminder after conversation ends
     )
 
     app.add_handler(CommandHandler("start", start))
@@ -272,4 +292,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
