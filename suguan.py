@@ -111,7 +111,7 @@ async def enter_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def enter_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_input = update.message.text
+    user_input = update.message.text.strip()
     try:
         date_obj = datetime.strptime(user_input, "%m-%d-%Y")
         day_of_week = date_obj.strftime("%A")
@@ -125,20 +125,23 @@ async def enter_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def enter_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_input = update.message.text
+    user_input = update.message.text.strip()
     try:
-        time_obj = datetime.strptime(user_input, "%H:%M")
-        context.user_data["time_24"] = user_input
-        context.user_data["time_12"] = convert_to_12hr(user_input)
+        # Parse hour and minute manually to accept single-digit hours
+        hour, minute = map(int, user_input.split(":"))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError
+        context.user_data["time_24"] = f"{hour:02d}:{minute:02d}"
+        context.user_data["time_12"] = datetime.strptime(f"{hour:02d}:{minute:02d}", "%H:%M").strftime("%I:%M %p")
         await update.message.reply_text("Enter the locale of your schedule:")
         return LOCALE
-    except ValueError:
+    except Exception:
         await update.message.reply_text("Invalid time format. Please enter as HH:MM (24-hour).")
         return TIME
 
 
 async def enter_locale(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["locale"] = update.message.text
+    context.user_data["locale"] = update.message.text.strip()
     keyboard = [[InlineKeyboardButton(role, callback_data=role)] for role in ROLE_OPTIONS]
     await update.message.reply_text("Select your role:", reply_markup=InlineKeyboardMarkup(keyboard))
     return ROLE
@@ -259,7 +262,7 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Main ---
 def main():
     # Replace 'YOUR_BOT_TOKEN' with your actual token
-    application = ApplicationBuilder().token("8470276015:AAFxZHzAF-4-Gcrg1YiTT853fYwvfZkj7fM").build()
+    application = ApplicationBuilder().token("YOUR_BOT_TOKEN").build()
 
     # ConversationHandler for enter workflow
     enter_handler = ConversationHandler(
