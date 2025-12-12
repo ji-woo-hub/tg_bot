@@ -59,20 +59,23 @@ reminder_jobs = {}  # schedule_id -> Job
 
 # --- Helper Functions ---
 def convert_to_12hr(time_str):
-    """Convert 24-hour time HH:MM to 12-hour AM/PM format."""
     t = datetime.strptime(time_str, "%H:%M")
     return t.strftime("%I:%M %p")
 
 
 def schedule_reminder(application, schedule_id, user_id, reminder_time):
-    """Schedules a reminder 3 hours before the actual schedule and keeps track of the Job."""
+    """Safely schedule a reminder 3 hours before the schedule."""
+    if not application.job_queue:
+        logger.warning("JobQueue not ready yet, cannot schedule reminder.")
+        return
+
     async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
         cursor.execute(
             "SELECT date, day, time_12, locale, role, language, status FROM schedules WHERE id=?",
-            (schedule_id,)
+            (schedule_id,),
         )
         row = cursor.fetchone()
-        if row and row[6] == "active":  # Only send if still active
+        if row and row[6] == "active":  # Only send if active
             date, day, time_12, locale, role, language, _ = row
             msg = (
                 f"⏰ Reminder: Your upcoming Suguan is in 3 hours!\n\n"
@@ -87,7 +90,9 @@ def schedule_reminder(application, schedule_id, user_id, reminder_time):
 
     delay = (reminder_time - datetime.now()).total_seconds()
     if delay > 0:
-        job = application.job_queue.run_once(lambda ctx: asyncio.create_task(send_reminder(ctx)), when=delay)
+        job = application.job_queue.run_once(
+            lambda ctx: asyncio.create_task(send_reminder(ctx)), when=delay
+        )
         reminder_jobs[schedule_id] = job
 
 
@@ -114,9 +119,8 @@ async def enter_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.strip()
     try:
         date_obj = datetime.strptime(user_input, "%m-%d-%Y")
-        day_of_week = date_obj.strftime("%A")
         context.user_data["date"] = user_input
-        context.user_data["day"] = day_of_week
+        context.user_data["day"] = date_obj.strftime("%A")
         await update.message.reply_text("Enter the time of your schedule in 24-hour format (HH:MM):")
         return TIME
     except ValueError:
@@ -127,12 +131,13 @@ async def enter_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def enter_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.strip()
     try:
-        # Parse hour and minute manually to accept single-digit hours
         hour, minute = map(int, user_input.split(":"))
         if not (0 <= hour <= 23 and 0 <= minute <= 59):
             raise ValueError
         context.user_data["time_24"] = f"{hour:02d}:{minute:02d}"
-        context.user_data["time_12"] = datetime.strptime(f"{hour:02d}:{minute:02d}", "%H:%M").strftime("%I:%M %p")
+        context.user_data["time_12"] = datetime.strptime(
+            context.user_data["time_24"], "%H:%M"
+        ).strftime("%I:%M %p")
         await update.message.reply_text("Enter the locale of your schedule:")
         return LOCALE
     except Exception:
@@ -151,7 +156,6 @@ async def enter_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data["role"] = query.data
-
     keyboard = [[InlineKeyboardButton(lang, callback_data=lang)] for lang in LANGUAGE_OPTIONS]
     await query.edit_message_text("Select language:", reply_markup=InlineKeyboardMarkup(keyboard))
     return LANGUAGE
@@ -170,13 +174,22 @@ async def enter_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
         INSERT INTO schedules (user_id, date, day, time_24, time_12, locale, role, language, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (user_id, data["date"], data["day"], data["time_24"], data["time_12"],
-         data["locale"], data["role"], data["language"], "active")
+        (
+            user_id,
+            data["date"],
+            data["day"],
+            data["time_24"],
+            data["time_12"],
+            data["locale"],
+            data["role"],
+            data["language"],
+            "active",
+        ),
     )
     conn.commit()
     schedule_id = cursor.lastrowid
 
-    # Schedule reminder 3 hours before
+    # Schedule reminder safely
     schedule_datetime = datetime.strptime(f"{data['date']} {data['time_24']}", "%m-%d-%Y %H:%M")
     reminder_time = schedule_datetime - timedelta(hours=3)
     schedule_reminder(context.application, schedule_id, user_id, reminder_time)
@@ -202,7 +215,7 @@ async def cancel_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     cursor.execute(
         "SELECT id, date, day, time_12, locale, role FROM schedules WHERE user_id=? AND status='active'",
-        (user_id,)
+        (user_id,),
     )
     rows = cursor.fetchall()
     if not rows:
@@ -221,14 +234,13 @@ async def cancel_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     schedule_id = int(query.data)
 
-    # Update database
     cursor.execute("UPDATE schedules SET status='canceled' WHERE id=?", (schedule_id,))
     conn.commit()
 
     # Remove scheduled reminder if it exists
     job = reminder_jobs.pop(schedule_id, None)
     if job:
-        job.schedule_removal()  # Remove from job queue
+        job.schedule_removal()
 
     await query.edit_message_text("✅ Schedule canceled, reminder removed.")
 
@@ -238,7 +250,7 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     cursor.execute(
         "SELECT date, day, time_12, locale, role, language, status FROM schedules WHERE user_id=? ORDER BY id DESC LIMIT 10",
-        (user_id,)
+        (user_id,),
     )
     rows = cursor.fetchall()
     if not rows:
@@ -261,13 +273,13 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Main ---
 def main():
-    # Replace 'YOUR_BOT_TOKEN' with your actual token
-    application = ApplicationBuilder().token("YOUR_BOT_TOKEN").build()
+    application = ApplicationBuilder().token("8470276015:AAFxZHzAF-4-Gcrg1YiTT853fYwvfZkj7fM").build()
 
-    # ConversationHandler for enter workflow
     enter_handler = ConversationHandler(
-        entry_points=[CommandHandler("enter", enter_start, filters=None),
-                      MessageHandler(filters.Regex("(?i)^enter$"), enter_start)],
+        entry_points=[
+            CommandHandler("enter", enter_start, filters=None),
+            MessageHandler(filters.Regex("(?i)^enter$"), enter_start),
+        ],
         states={
             DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_date)],
             TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_time)],
@@ -278,14 +290,12 @@ def main():
         fallbacks=[CommandHandler("cancel", enter_cancel)],
     )
 
-    # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(enter_handler)
     application.add_handler(MessageHandler(filters.Regex("(?i)^cancel$"), cancel_schedule))
     application.add_handler(CallbackQueryHandler(cancel_selected, pattern=r"^\d+$"))
     application.add_handler(MessageHandler(filters.Regex("(?i)^history$"), show_history))
 
-    # Run the bot
     application.run_polling()
 
 
