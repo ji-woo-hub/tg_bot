@@ -111,7 +111,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Enter workflow handlers ---
 async def enter_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Please enter the date of your schedule (MM-DD-YYYY):")
+    await update.message.reply_text("Enter the Date of your Suguan (MM-DD-YYYY):")
     return DATE
 
 
@@ -121,7 +121,7 @@ async def enter_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         date_obj = datetime.strptime(user_input, "%m-%d-%Y")
         context.user_data["date"] = user_input
         context.user_data["day"] = date_obj.strftime("%A")
-        await update.message.reply_text("Enter the time of your schedule in 24-hour format (HH:MM):")
+        await update.message.reply_text("Enter the Time of your Suguan in 24-hour format (HH:MM):")
         return TIME
     except ValueError:
         await update.message.reply_text("Invalid date format. Please enter as MM-DD-YYYY.")
@@ -138,7 +138,7 @@ async def enter_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["time_12"] = datetime.strptime(
             context.user_data["time_24"], "%H:%M"
         ).strftime("%I:%M %p")
-        await update.message.reply_text("Enter the locale of your schedule:")
+        await update.message.reply_text("Enter the Locale of your Suguan:")
         return LOCALE
     except Exception:
         await update.message.reply_text("Invalid time format. Please enter as HH:MM (24-hour).")
@@ -148,7 +148,7 @@ async def enter_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def enter_locale(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["locale"] = update.message.text.strip()
     keyboard = [[InlineKeyboardButton(role, callback_data=role)] for role in ROLE_OPTIONS]
-    await update.message.reply_text("Select your role:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("Select your Role:", reply_markup=InlineKeyboardMarkup(keyboard))
     return ROLE
 
 
@@ -157,7 +157,7 @@ async def enter_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     context.user_data["role"] = query.data
     keyboard = [[InlineKeyboardButton(lang, callback_data=lang)] for lang in LANGUAGE_OPTIONS]
-    await query.edit_message_text("Select language:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text("Select Language:", reply_markup=InlineKeyboardMarkup(keyboard))
     return LANGUAGE
 
 
@@ -195,7 +195,7 @@ async def enter_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     schedule_reminder(context.application, schedule_id, user_id, reminder_time)
 
     await query.edit_message_text(
-        f"✅ Schedule created!\n\n"
+        f"✅ Suguan created!\n\n"
         f"📅 Date: {data['date']} ({data['day']})\n"
         f"🕒 Time: {data['time_12']}\n"
         f"📍 Locale: {data['locale']}\n"
@@ -206,7 +206,7 @@ async def enter_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def enter_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Schedule creation canceled.")
+    await update.message.reply_text("Suguan creation canceled.")
     return ConversationHandler.END
 
 
@@ -219,7 +219,7 @@ async def cancel_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     rows = cursor.fetchall()
     if not rows:
-        await update.message.reply_text("You have no active schedules.")
+        await update.message.reply_text("You have no active Suguan.")
         return
 
     keyboard = [
@@ -242,7 +242,7 @@ async def cancel_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if job:
         job.schedule_removal()
 
-    await query.edit_message_text("✅ Schedule canceled, reminder removed.")
+    await query.edit_message_text("✅ Suguan canceled, reminder removed.")
 
 
 # --- History workflow ---
@@ -254,7 +254,7 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     rows = cursor.fetchall()
     if not rows:
-        await update.message.reply_text("No schedules found.")
+        await update.message.reply_text("No Suguan found.")
         return
 
     messages = []
@@ -301,3 +301,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
