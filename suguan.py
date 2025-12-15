@@ -1,7 +1,7 @@
+import asyncio
 import sqlite3
 from datetime import datetime, timedelta
-import logging
-import asyncio
+from typing import Dict
 
 from telegram import (
     Update,
@@ -11,294 +11,356 @@ from telegram import (
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    ContextTypes,
-    ConversationHandler,
     MessageHandler,
     CallbackQueryHandler,
+    ConversationHandler,
+    ContextTypes,
     filters,
 )
 
-# --- Logging ---
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# =========================
+# CONFIG
+# =========================
+TOKEN = "YOUR_BOT_TOKEN"
+DB_FILE = "suguan.db"
+REMINDER_HOURS = 3
 
-# --- SQLite Setup ---
-conn = sqlite3.connect("suguan.db", check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute(
-    """
-CREATE TABLE IF NOT EXISTS schedules (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    date TEXT NOT NULL,
-    day TEXT NOT NULL,
-    time_24 TEXT NOT NULL,
-    time_12 TEXT NOT NULL,
-    locale TEXT NOT NULL,
-    role TEXT NOT NULL,
-    language TEXT NOT NULL,
-    status TEXT NOT NULL
-)
-"""
-)
-conn.commit()
-
-# --- Conversation states ---
+# =========================
+# CONVERSATION STATES
+# =========================
 DATE, TIME, LOCALE, ROLE, LANGUAGE = range(5)
 
-# --- Roles & Languages ---
-ROLE_OPTIONS = ["Sugo 1", "Sugo 2", "Reserba 1", "Reserba 2", "Sign Language"]
-LANGUAGE_OPTIONS = ["Tagalog", "English"]
+# =========================
+# IN-MEMORY JOB TRACKER
+# =========================
+reminder_jobs: Dict[int, object] = {}
 
-# --- Track reminder jobs ---
-reminder_jobs = {}  # schedule_id -> Job
-
-
-# --- Helper Functions ---
-def convert_to_12hr(time_str):
-    t = datetime.strptime(time_str, "%H:%M")
-    return t.strftime("%I:%M %p")
-
-
-def schedule_reminder(application, schedule_id, user_id, reminder_time):
-    """Safely schedule a reminder 3 hours before the schedule."""
-    if not application.job_queue:
-        logger.warning("JobQueue not ready yet, cannot schedule reminder.")
-        return
-
-    async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
-        cursor.execute(
-            "SELECT date, day, time_12, locale, role, language, status FROM schedules WHERE id=?",
-            (schedule_id,),
+# =========================
+# DATABASE
+# =========================
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS schedules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            date TEXT,
+            day TEXT,
+            time_24 TEXT,
+            time_12 TEXT,
+            locale TEXT,
+            role TEXT,
+            language TEXT,
+            status TEXT
         )
-        row = cursor.fetchone()
-        if row and row[6] == "active":  # Only send if active
-            date, day, time_12, locale, role, language, _ = row
-            msg = (
-                f"⏰ Reminder: Your upcoming Suguan is in 3 hours!\n\n"
-                f"📅 Date: {date} ({day})\n"
-                f"🕒 Time: {time_12}\n"
-                f"📍 Locale: {locale}\n"
-                f"🎭 Role: {role}\n"
-                f"🗣 Language: {language}"
-            )
-            await application.bot.send_message(chat_id=user_id, text=msg)
-        reminder_jobs.pop(schedule_id, None)
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_user_status
+        ON schedules(user_id, status)
+    """)
+    conn.commit()
+    conn.close()
 
-    delay = (reminder_time - datetime.now()).total_seconds()
-    if delay > 0:
-        job = application.job_queue.run_once(
-            lambda ctx: asyncio.create_task(send_reminder(ctx)), when=delay
-        )
-        reminder_jobs[schedule_id] = job
+# =========================
+# UTILITIES
+# =========================
+def parse_datetime(date_str, time_str):
+    dt = datetime.strptime(f"{date_str} {time_str}", "%m-%d-%Y %H:%M")
+    return dt
 
+def format_12h(time_24):
+    return datetime.strptime(time_24, "%H:%M").strftime("%I:%M %p").lstrip("0")
 
-# --- /start handler ---
+# =========================
+# START
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_text = (
-        "Welcome to Suguan Scheduler Bot!\n\n"
-        "Available commands:\n"
-        "- enter → start a new schedule\n"
-        "- cancel → cancel an active schedule\n"
-        "- history → view last 10 schedules\n\n"
-        "All commands are case-insensitive and do NOT require a / except /start."
+    await update.message.reply_text(
+        "👋 Welcome to the Suguan Scheduler Bot!\n\n"
+        "Commands:\n"
+        "• enter – create a new schedule\n"
+        "• cancel – cancel an active schedule\n"
+        "• history – show last 10 schedules"
     )
-    await update.message.reply_text(welcome_text)
 
-
-# --- Enter workflow handlers ---
-async def enter_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Enter the Date of your Suguan (MM-DD-YYYY):")
+# =========================
+# ENTER WORKFLOW
+# =========================
+async def enter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📅 Enter date (MM-DD-YYYY):")
     return DATE
 
-
-async def enter_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_input = update.message.text.strip()
+async def get_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        date_obj = datetime.strptime(user_input, "%m-%d-%Y")
-        context.user_data["date"] = user_input
-        context.user_data["day"] = date_obj.strftime("%A")
-        await update.message.reply_text("Enter the Time of your Suguan in 24-hour format (HH:MM):")
+        date = datetime.strptime(update.message.text, "%m-%d-%Y")
+        context.user_data["date"] = update.message.text
+        context.user_data["day"] = date.strftime("%A")
+        await update.message.reply_text("🕒 Enter time (24h HH:MM):")
         return TIME
     except ValueError:
-        await update.message.reply_text("Invalid date format. Please enter as MM-DD-YYYY.")
+        await update.message.reply_text("❌ Invalid date format. Try again:")
         return DATE
 
-
-async def enter_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_input = update.message.text.strip()
+async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        hour, minute = map(int, user_input.split(":"))
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-        context.user_data["time_24"] = f"{hour:02d}:{minute:02d}"
-        context.user_data["time_12"] = datetime.strptime(
-            context.user_data["time_24"], "%H:%M"
-        ).strftime("%I:%M %p")
-        await update.message.reply_text("Enter the Locale of your Suguan:")
+        datetime.strptime(update.message.text, "%H:%M")
+        context.user_data["time_24"] = update.message.text
+        context.user_data["time_12"] = format_12h(update.message.text)
+        await update.message.reply_text("📍 Enter locale:")
         return LOCALE
-    except Exception:
-        await update.message.reply_text("Invalid time format. Please enter as HH:MM (24-hour).")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid time format. Try again:")
         return TIME
 
-
-async def enter_locale(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["locale"] = update.message.text.strip()
-    keyboard = [[InlineKeyboardButton(role, callback_data=role)] for role in ROLE_OPTIONS]
-    await update.message.reply_text("Select your Role:", reply_markup=InlineKeyboardMarkup(keyboard))
+async def get_locale(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["locale"] = update.message.text
+    keyboard = [
+        [InlineKeyboardButton("Sugo 1", callback_data="Sugo 1")],
+        [InlineKeyboardButton("Sugo 2", callback_data="Sugo 2")],
+        [InlineKeyboardButton("Reserba 1", callback_data="Reserba 1")],
+        [InlineKeyboardButton("Reserba 2", callback_data="Reserba 2")],
+        [InlineKeyboardButton("Sign Language", callback_data="Sign Language")],
+    ]
+    await update.message.reply_text("🎭 Select role:", reply_markup=InlineKeyboardMarkup(keyboard))
     return ROLE
 
-
-async def enter_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def get_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data["role"] = query.data
-    keyboard = [[InlineKeyboardButton(lang, callback_data=lang)] for lang in LANGUAGE_OPTIONS]
-    await query.edit_message_text("Select Language:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    keyboard = [
+        [InlineKeyboardButton("Tagalog", callback_data="Tagalog")],
+        [InlineKeyboardButton("English", callback_data="English")],
+    ]
+    await query.edit_message_text("🗣 Select language:", reply_markup=InlineKeyboardMarkup(keyboard))
     return LANGUAGE
 
-
-async def enter_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def get_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data["language"] = query.data
 
-    # Save to database
-    user_id = update.effective_user.id
-    data = context.user_data
-    cursor.execute(
-        """
-        INSERT INTO schedules (user_id, date, day, time_24, time_12, locale, role, language, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            user_id,
-            data["date"],
-            data["day"],
-            data["time_24"],
-            data["time_12"],
-            data["locale"],
-            data["role"],
-            data["language"],
-            "active",
-        ),
-    )
+    user_id = query.from_user.id
+
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO schedules
+        (user_id, date, day, time_24, time_12, locale, role, language, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+    """, (
+        user_id,
+        context.user_data["date"],
+        context.user_data["day"],
+        context.user_data["time_24"],
+        context.user_data["time_12"],
+        context.user_data["locale"],
+        context.user_data["role"],
+        context.user_data["language"],
+    ))
+    schedule_id = cur.lastrowid
     conn.commit()
-    schedule_id = cursor.lastrowid
+    conn.close()
 
-    # Schedule reminder safely
-    schedule_datetime = datetime.strptime(f"{data['date']} {data['time_24']}", "%m-%d-%Y %H:%M")
-    reminder_time = schedule_datetime - timedelta(hours=3)
-    schedule_reminder(context.application, schedule_id, user_id, reminder_time)
+    await query.edit_message_text("✅ Schedule saved!")
 
-    await query.edit_message_text(
-        f"✅ Suguan created!\n\n"
-        f"📅 Date: {data['date']} ({data['day']})\n"
-        f"🕒 Time: {data['time_12']}\n"
-        f"📍 Locale: {data['locale']}\n"
-        f"🎭 Role: {data['role']}\n"
-        f"🗣 Language: {data['language']}"
+    schedule_reminder(
+        context.application,
+        schedule_id,
+        user_id,
+        context.user_data
     )
+
     return ConversationHandler.END
 
+# =========================
+# REMINDER LOGIC
+# =========================
+def schedule_reminder(app, schedule_id, user_id, data):
+    schedule_dt = parse_datetime(data["date"], data["time_24"])
+    reminder_dt = schedule_dt - timedelta(hours=REMINDER_HOURS)
 
-async def enter_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Suguan creation canceled.")
-    return ConversationHandler.END
+    if reminder_dt <= datetime.now():
+        return
 
+    delay = (reminder_dt - datetime.now()).total_seconds()
 
-# --- Cancel workflow ---
-async def cancel_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    cursor.execute(
-        "SELECT id, date, day, time_12, locale, role FROM schedules WHERE user_id=? AND status='active'",
-        (user_id,),
+    job = app.job_queue.run_once(
+        send_reminder,
+        when=delay,
+        data={
+            "schedule_id": schedule_id,
+            "user_id": user_id
+        }
     )
-    rows = cursor.fetchall()
+
+    reminder_jobs[schedule_id] = job
+
+async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    schedule_id = job.data["schedule_id"]
+    user_id = job.data["user_id"]
+
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT date, day, time_12, locale, role, language
+        FROM schedules WHERE id=?
+    """, (schedule_id,))
+    row = cur.fetchone()
+
+    if not row:
+        conn.close()
+        return
+
+    msg = (
+        "⏰ Reminder: Your upcoming Suguan is in 3 hours!\n\n"
+        f"📅 Date: {row[0]} ({row[1]})\n"
+        f"🕒 Time: {row[2]}\n"
+        f"📍 Locale: {row[3]}\n"
+        f"🎭 Role: {row[4]}\n"
+        f"🗣 Language: {row[5]}"
+    )
+
+    await context.bot.send_message(chat_id=user_id, text=msg)
+
+    cur.execute("UPDATE schedules SET status='finished' WHERE id=?", (schedule_id,))
+    conn.commit()
+    conn.close()
+
+    reminder_jobs.pop(schedule_id, None)
+
+# =========================
+# CANCEL
+# =========================
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, date, time_12 FROM schedules
+        WHERE user_id=? AND status='active'
+    """, (user_id,))
+    rows = cur.fetchall()
+    conn.close()
+
     if not rows:
-        await update.message.reply_text("You have no active Suguan.")
+        await update.message.reply_text("No active schedules.")
         return
 
     keyboard = [
-        [InlineKeyboardButton(f"{row[1]} {row[2]} {row[3]} - {row[4]} ({row[5]})", callback_data=str(row[0]))]
-        for row in rows
+        [InlineKeyboardButton(f"{r[1]} {r[2]}", callback_data=str(r[0]))]
+        for r in rows
     ]
-    await update.message.reply_text("Select a schedule to cancel:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(
+        "Select schedule to cancel:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-
-async def cancel_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def confirm_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     schedule_id = int(query.data)
 
-    cursor.execute("UPDATE schedules SET status='canceled' WHERE id=?", (schedule_id,))
-    conn.commit()
-
-    # Remove scheduled reminder if it exists
     job = reminder_jobs.pop(schedule_id, None)
     if job:
         job.schedule_removal()
 
-    await query.edit_message_text("✅ Suguan canceled, reminder removed.")
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("UPDATE schedules SET status='cancelled' WHERE id=?", (schedule_id,))
+    conn.commit()
+    conn.close()
 
+    await query.edit_message_text("❌ Schedule cancelled.")
 
-# --- History workflow ---
-async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    cursor.execute(
-        "SELECT date, day, time_12, locale, role, language, status FROM schedules WHERE user_id=? ORDER BY id DESC LIMIT 10",
-        (user_id,),
-    )
-    rows = cursor.fetchall()
+# =========================
+# HISTORY
+# =========================
+async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT date, day, time_12, locale, role, language, status
+        FROM schedules
+        WHERE user_id=?
+        ORDER BY id DESC LIMIT 10
+    """, (user_id,))
+    rows = cur.fetchall()
+    conn.close()
+
     if not rows:
-        await update.message.reply_text("No Suguan found.")
+        await update.message.reply_text("No history.")
         return
 
-    messages = []
+    msg = "📜 Last 10 schedules:\n\n"
     for r in rows:
-        messages.append(
-            f"📅 {r[0]} ({r[1]})\n"
-            f"🕒 {r[2]}\n"
-            f"📍 {r[3]}\n"
-            f"🎭 {r[4]}\n"
-            f"🗣 {r[5]}\n"
-            f"Status: {r[6]}\n"
-            "----------------"
+        msg += (
+            f"{r[0]} ({r[1]}) | {r[2]} | {r[3]} | {r[4]} | {r[5]} | {r[6]}\n"
         )
-    await update.message.reply_text("\n".join(messages))
 
+    await update.message.reply_text(msg)
 
-# --- Main ---
-def main():
-    application = ApplicationBuilder().token("8470276015:AAFxZHzAF-4-Gcrg1YiTT853fYwvfZkj7fM").build()
+# =========================
+# STARTUP: RELOAD REMINDERS
+# =========================
+async def reload_reminders(app):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, user_id, date, time_24
+        FROM schedules WHERE status='active'
+    """)
+    rows = cur.fetchall()
+    conn.close()
 
-    enter_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler("enter", enter_start, filters=None),
-            MessageHandler(filters.Regex("(?i)^enter$"), enter_start),
-        ],
+    for sid, uid, date, time_24 in rows:
+        try:
+            dt = parse_datetime(date, time_24)
+            reminder = dt - timedelta(hours=REMINDER_HOURS)
+            if reminder > datetime.now():
+                delay = (reminder - datetime.now()).total_seconds()
+                job = app.job_queue.run_once(
+                    send_reminder,
+                    when=delay,
+                    data={"schedule_id": sid, "user_id": uid}
+                )
+                reminder_jobs[sid] = job
+        except:
+            pass
+
+# =========================
+# MAIN
+# =========================
+async def main():
+    init_db()
+
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("enter", enter)],
         states={
-            DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_date)],
-            TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_time)],
-            LOCALE: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_locale)],
-            ROLE: [CallbackQueryHandler(enter_role)],
-            LANGUAGE: [CallbackQueryHandler(enter_language)],
+            DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_date)],
+            TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_time)],
+            LOCALE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_locale)],
+            ROLE: [CallbackQueryHandler(get_role)],
+            LANGUAGE: [CallbackQueryHandler(get_language)],
         },
-        fallbacks=[CommandHandler("cancel", enter_cancel)],
+        fallbacks=[]
     )
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(enter_handler)
-    application.add_handler(MessageHandler(filters.Regex("(?i)^cancel$"), cancel_schedule))
-    application.add_handler(CallbackQueryHandler(cancel_selected, pattern=r"^\d+$"))
-    application.add_handler(MessageHandler(filters.Regex("(?i)^history$"), show_history))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(conv)
+    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CallbackQueryHandler(confirm_cancel))
+    app.add_handler(CommandHandler("history", history))
 
-    application.run_polling()
+    await reload_reminders(app)
 
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
-
+    asyncio.run(main())
