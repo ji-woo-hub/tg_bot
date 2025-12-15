@@ -1,13 +1,8 @@
-import asyncio
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Dict
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -21,17 +16,17 @@ from telegram.ext import (
 # =========================
 # CONFIG
 # =========================
-TOKEN = "YOUR_BOT_TOKEN"
+TOKEN = "8470276015:AAFxZHzAF-4-Gcrg1YiTT853fYwvfZkj7fM"
 DB_FILE = "suguan.db"
 REMINDER_HOURS = 3
 
 # =========================
-# CONVERSATION STATES
+# STATES
 # =========================
 DATE, TIME, LOCALE, ROLE, LANGUAGE = range(5)
 
 # =========================
-# IN-MEMORY JOB TRACKER
+# JOB TRACKER
 # =========================
 reminder_jobs: Dict[int, object] = {}
 
@@ -63,17 +58,16 @@ def init_db():
     conn.close()
 
 # =========================
-# UTILITIES
+# UTILS
 # =========================
 def parse_datetime(date_str, time_str):
-    dt = datetime.strptime(f"{date_str} {time_str}", "%m-%d-%Y %H:%M")
-    return dt
+    return datetime.strptime(f"{date_str} {time_str}", "%m-%d-%Y %H:%M")
 
 def format_12h(time_24):
     return datetime.strptime(time_24, "%H:%M").strftime("%I:%M %p").lstrip("0")
 
 # =========================
-# START
+# COMMANDS
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -93,13 +87,13 @@ async def enter(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def get_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        date = datetime.strptime(update.message.text, "%m-%d-%Y")
+        d = datetime.strptime(update.message.text, "%m-%d-%Y")
         context.user_data["date"] = update.message.text
-        context.user_data["day"] = date.strftime("%A")
+        context.user_data["day"] = d.strftime("%A")
         await update.message.reply_text("🕒 Enter time (24h HH:MM):")
         return TIME
     except ValueError:
-        await update.message.reply_text("❌ Invalid date format. Try again:")
+        await update.message.reply_text("❌ Invalid date. Try again:")
         return DATE
 
 async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -110,7 +104,7 @@ async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📍 Enter locale:")
         return LOCALE
     except ValueError:
-        await update.message.reply_text("❌ Invalid time format. Try again:")
+        await update.message.reply_text("❌ Invalid time. Try again:")
         return TIME
 
 async def get_locale(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -122,7 +116,10 @@ async def get_locale(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Reserba 2", callback_data="Reserba 2")],
         [InlineKeyboardButton("Sign Language", callback_data="Sign Language")],
     ]
-    await update.message.reply_text("🎭 Select role:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(
+        "🎭 Select role:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return ROLE
 
 async def get_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -134,7 +131,10 @@ async def get_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Tagalog", callback_data="Tagalog")],
         [InlineKeyboardButton("English", callback_data="English")],
     ]
-    await query.edit_message_text("🗣 Select language:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(
+        "🗣 Select language:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return LANGUAGE
 
 async def get_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -176,7 +176,7 @@ async def get_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # =========================
-# REMINDER LOGIC
+# REMINDER
 # =========================
 def schedule_reminder(app, schedule_id, user_id, data):
     schedule_dt = parse_datetime(data["date"], data["time_24"])
@@ -190,10 +190,7 @@ def schedule_reminder(app, schedule_id, user_id, data):
     job = app.job_queue.run_once(
         send_reminder,
         when=delay,
-        data={
-            "schedule_id": schedule_id,
-            "user_id": user_id
-        }
+        data={"schedule_id": schedule_id, "user_id": user_id}
     )
 
     reminder_jobs[schedule_id] = job
@@ -305,7 +302,7 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 # =========================
-# STARTUP: RELOAD REMINDERS
+# STARTUP RELOAD
 # =========================
 async def reload_reminders(app):
     conn = sqlite3.connect(DB_FILE)
@@ -318,24 +315,21 @@ async def reload_reminders(app):
     conn.close()
 
     for sid, uid, date, time_24 in rows:
-        try:
-            dt = parse_datetime(date, time_24)
-            reminder = dt - timedelta(hours=REMINDER_HOURS)
-            if reminder > datetime.now():
-                delay = (reminder - datetime.now()).total_seconds()
-                job = app.job_queue.run_once(
-                    send_reminder,
-                    when=delay,
-                    data={"schedule_id": sid, "user_id": uid}
-                )
-                reminder_jobs[sid] = job
-        except:
-            pass
+        dt = parse_datetime(date, time_24)
+        reminder = dt - timedelta(hours=REMINDER_HOURS)
+        if reminder > datetime.now():
+            delay = (reminder - datetime.now()).total_seconds()
+            job = app.job_queue.run_once(
+                send_reminder,
+                when=delay,
+                data={"schedule_id": sid, "user_id": uid}
+            )
+            reminder_jobs[sid] = job
 
 # =========================
 # MAIN
 # =========================
-async def main():
+def main():
     init_db()
 
     app = ApplicationBuilder().token(TOKEN).build()
@@ -349,7 +343,8 @@ async def main():
             ROLE: [CallbackQueryHandler(get_role)],
             LANGUAGE: [CallbackQueryHandler(get_language)],
         },
-        fallbacks=[]
+        fallbacks=[],
+        per_message=True   # ✅ FIX
     )
 
     app.add_handler(CommandHandler("start", start))
@@ -358,9 +353,9 @@ async def main():
     app.add_handler(CallbackQueryHandler(confirm_cancel))
     app.add_handler(CommandHandler("history", history))
 
-    await reload_reminders(app)
+    app.post_init = reload_reminders  # ✅ FIX
 
-    await app.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
